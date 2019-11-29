@@ -21,16 +21,38 @@
  *                                                                         *
  ***************************************************************************/
 """
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, QVariant
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 
-# Initialize Qt resources from file resources.py
-from .resources import *
-# Import the code for the dialog
-from .rasterisochrones_dialog import RasterIsochronesDialog
+from qgis.core import QgsProject
+from qgis.core import (
+    QgsVectorLayer, QgsRasterLayer, QgsMessageLog, Qgis, QgsWkbTypes as T,
+    QgsDistanceArea, QgsPointXY, QgsField, edit)
+
+try:
+    # Initialize Qt resources from file resources.py
+    from .resources import *
+    # Import the code for the dialog
+    from .rasterisochrones_dialog import RasterIsochronesDialog
+except ModuleNotFoundError:
+    pass
+
 import os.path
 
+from typing import Callable, Tuple
+
+import numpy
+import tempfile
+from heapq import heappush, heappop
+
+import matplotlib.pyplot as plt
+import osr
+import gdal
+import cartopy.geodesic as geodesic
+
+distance = QgsDistanceArea()
+distance.setEllipsoid('WGS84')
 
 class RasterIsochrones:
     """QGIS Plugin Implementation."""
@@ -118,7 +140,7 @@ class RasterIsochrones:
             be added to the toolbar. Defaults to True.
         :type add_to_toolbar: bool
 
-        :param status_tip: Optional text to show in a popup when mouse pointer
+        :param status_tip: Optional text to show in a popup when mouse pointser
             hovers over the action.
         :type status_tip: str
 
@@ -126,7 +148,7 @@ class RasterIsochrones:
         :type parent: QWidget
 
         :param whats_this: Optional text to show in the status bar when the
-            mouse pointer hovers over the action.
+            mouse pointser hovers over the action.
 
         :returns: The action that was created. Note that the action is also
             added to self.actions list.
@@ -189,12 +211,385 @@ class RasterIsochrones:
             self.first_start = False
             self.dlg = RasterIsochronesDialog()
 
+        # Fetch raster and points layers of the current project, to choose from
+        project = QgsProject.instance()
+        layers = project.mapLayers().values()
+        raster_layers = {
+            layer.name(): layer
+            for layer in layers
+            if isinstance(layer, QgsRasterLayer)}
+        self.dlg.raster.clear()
+        self.dlg.raster.addItems(raster_layers.keys())
+        points_layers = {
+            layer.name(): layer
+            for layer in layers
+            if isinstance(layer, QgsVectorLayer) and layer.geometryType() == T.PointGeometry}
+        self.dlg.points.clear()
+        self.dlg.points.addItems(points_layers.keys())
+
         # show the dialog
         self.dlg.show()
         # Run the dialog event loop
         result = self.dlg.exec_()
         # See if OK was pressed
         if result:
-            # Do something useful here - delete the line containing pass and
-            # substitute with your code.
-            pass
+            points_layer = points_layers[self.dlg.points.currentText()]
+
+            raster_layer = raster_layers[self.dlg.raster.currentText()]
+            provider = raster_layer.dataProvider()
+            extent = provider.extent()
+
+            column = self.dlg.column.text()
+
+            original = gdal.Open(provider.dataSourceUri())
+            anchor_x, x0, x1, anchor_y, y0, y1 = original.GetGeoTransform()
+            print((anchor_x, anchor_y), (x0, x1), (y0, y1))
+            def coordinates_for_cell(col, row):
+                col += 0.5
+                row += 0.5
+                return (anchor_x + x0 * col + x1 * row,
+                        anchor_y + y0 * col + y1 * row)
+            def cell_for_coordinates(coordinates):
+                coeff = 1 / (x0 * y1 + x1 * y0)
+                x_raw, y_raw = coordinates
+                x = x_raw - anchor_x
+                y = y_raw - anchor_y
+                col = coeff * (y1 * x - x1 * y)
+                row = coeff * (-y0 * x + x0 * y)
+                # int() truncates towards 0, so we have to use something else.
+                # int(col) - (col<0) would also be an option, but is even more intransparent.
+                # Negative cell indices *should* not appear, but who knows what else this function will be used for!
+                return (round(col - 0.5), round(row - 0.5))
+            if self.dlg.distance_fn.currentText() == "Tobler's Hiking Time":
+                elevation = provider.block(1, provider.extent(), provider.xSize(), provider.ySize())
+                distance_fn = tobler_hiking_time(elevation, coordinates_for_cell)
+            elif self.dlg.distance_fn.currentText() == "Tobler's Hiking Time (Backwards)":
+                distance_fn = directed_geodesic_grid_distance(coordinates_for_cell)
+                # elevation = provider.block(1, provider.extent(), provider.xSize(), provider.ySize())
+                # raise NotImplementedError("We lack a way to go backwards")
+                # distance_fn = tobler_hiking_time(elevation, coordinates_for_cell)
+            elif self.dlg.distance_fn.currentText() == "Geodesic Grid Distance":
+                distance_fn = geodesic_grid_distance(coordinates_for_cell)
+            elif self.dlg.distance_fn.currentText() == "Grid distance":
+                distance_fn = grid_dist
+            else:
+                self.iface.messageBar().pushMessage(
+                    "Error",
+                    "Programmer error: Distance function {:} is undefined.".format(
+                        self.dlg.distance_fn.currentText()), level=Qgis.Critical)
+
+            root = project.layerTreeRoot()
+            group = root.insertGroup(0, "Isochrones for {:}".format(
+                self.dlg.distance_fn.currentText()))
+
+            areas = raster_areas(coordinates_for_cell,
+                                 raster_layer.dataProvider().xSize(),
+                                 raster_layer.dataProvider().ySize())
+
+            id_new_col = points_layer.dataProvider().fieldNameIndex(column)
+            if id_new_col == -1:
+                points_layer.dataProvider().addAttributes([QgsField("harea", QVariant.Double, "double")])
+                with edit(points_layer):
+                    points_layer.dataProvider().addAttributes([
+                        QgsField(column, QVariant.Double, "double", 11, 2)])
+                id_new_col = points_layer.dataProvider().attributeIndexes()[-1]
+
+            driver = gdal.GetDriverByName("GTiff")
+
+            for f in points_layer.getFeatures():
+                location = f.geometry().asPoint()
+                if not extent.contains(location):
+                    QgsMessageLog.logMessage(
+                        "Feature {:} at {:} {:} is outside boundaries of {:}"
+                        "".format(f.id(),
+                                  location.x(), location.y(),
+                                  raster_layer.name()),
+                        'rasterisochrones',
+                        level=Qgis.Warning)
+                    continue
+
+                col, row = cell_for_coordinates((location.x(), location.y()))
+
+                distances = grid_distance(
+                    (col, row),
+                    (provider.xSize(), provider.ySize()),
+                    cutoff=self.dlg.maximum_dist.value(),
+                    distance_fn=distance_fn)
+
+                area = areas[numpy.isfinite(distances)].sum()
+                print("Calculated area:", area)
+
+                assert (distances == 0).any()
+                col0 = 0
+                while not numpy.isfinite(distances[col0]).any():
+                    col0 += 1
+                col1 = provider.xSize()
+                while not numpy.isfinite(distances[col1 - 1]).any():
+                    col1 -= 1
+                row0 = 0
+                while not numpy.isfinite(distances[:, row0]).any():
+                    row0 += 1
+                row1 = provider.ySize()
+                while not numpy.isfinite(distances[:, row1 - 1]).any():
+                    row1 -= 1
+                distances = distances[col0:col1, row0:row1]
+                distances[~numpy.isfinite(distances)] = -1.0
+
+                assert area == areas[col0:col1, row0:row1][distances >=0].sum()
+
+                _, distances_np = tempfile.mkstemp(
+                    suffix=".numpy".format(f.id()),
+                    prefix="rasterisochrones_{:}_".format(f.id()))
+                print("Distances:", distances, "written to", distances_np)
+                numpy.savetxt(distances_np, distances)
+
+                with edit(points_layer):
+                    points_layer.changeAttributeValue(f.id(), id_new_col, area)
+
+                _, output_file = tempfile.mkstemp(
+                    suffix=".tif",
+                    prefix="rasterisochrones_{:}_".format(f.id()))
+
+                # Create a new raster data source
+                outDs = driver.Create(output_file,
+                                      distances.shape[1], distances.shape[0],
+                                      1, gdal.GDT_Float32)
+                # Write metadata
+                outDs.SetGeoTransform(
+                                      [anchor_x + x0 * col0 + x1 * row0,
+                                       x0,
+                                       x1,
+                                       anchor_y + y0 * col0 + y1 * row0,
+                                       y0,
+                                       y1])
+                outDs.SetProjection(original.GetProjection())
+                band = outDs.GetRasterBand(1)
+                band.WriteArray(distances)
+                band.SetNoDataValue(-1.0)
+                del outDs
+                print("GeoTiff of distances written to", output_file)
+
+                layer = QgsRasterLayer(
+                    output_file,
+                    "Isochrones around {:}".format(f.id()))
+                project.addMapLayer(layer)
+                #group.addLayer(layer)
+
+
+def tobler_hiking_function(elevation_difference: float,
+                           horizontal_distance: float=100) -> float:
+    """Calculate hiking speed using Tobler's hiking function
+
+    Specify either the slope in percent (i.e. elevation difference in meter per
+    100 meters horizontal distance) or both elevation difference and horizontal
+    distance in the same units. The result is the estimated walking speed in
+    km/h.
+
+    Parameters
+    ==========
+    elevation_difference: The difference in elevation along the horizontal
+        path. Positive numbers mean going uphill, negative numbers downhill.
+    horizontal_distance: The horizontal length of the path. The default is
+        100m, so that giving an inclination in percent does not require this
+        second parameter to be set.
+    Returns
+    =======
+    Hiking speed in km/h
+
+    Examples
+    ========
+    >>> tobler_hiking_function(-5)
+    6.0
+    >>> tobler_hiking_function(100, 4000)
+    4.614758186211422
+    >>> tobler_hiking_function(0.0, 10)
+    5.036742124615245
+
+    """
+    return 6 * numpy.exp(-3.5 * abs(elevation_difference/horizontal_distance + 0.05))
+
+
+def geodesic_grid_distance(coordinate):
+    coordinates = {}
+    def dist(cell1, cell2):
+        try:
+            p1 = coordinates[cell1]
+        except KeyError:
+            p1 = coordinates[cell1] = QgsPointXY(*coordinate(*cell1))
+        try:
+            p2 = coordinates[cell2]
+        except KeyError:
+            p2 = coordinates[cell2] = QgsPointXY(*coordinate(*cell2))
+        return distance.measureLine([p1, p2])
+    return dist
+
+
+def directed_geodesic_grid_distance(coordinate):
+    coordinates = {}
+    def dist(cell1, cell2):
+        try:
+            p1 = coordinates[cell1]
+        except KeyError:
+            p1 = coordinates[cell1] = QgsPointXY(*coordinate(*cell1))
+        try:
+            p2 = coordinates[cell2]
+        except KeyError:
+            p2 = coordinates[cell2] = QgsPointXY(*coordinate(*cell2))
+        if p1[0] > p2[0]:
+            return numpy.inf
+        if p1[1] > p2[1]:
+            return numpy.inf
+        return distance.measureLine([p1, p2])
+    return dist
+
+
+def tobler_hiking_time(elevation, coordinate):
+    dist = geodesic_grid_distance(coordinate)
+    def tobler_dist(cell1, cell2):
+        geodesic_distance = dist(cell1, cell2)
+        elevation_difference = elevation.value(*cell2) - elevation.value(*cell1)
+        time = geodesic_distance / tobler_hiking_function(
+            elevation_difference, geodesic_distance) / 1000
+        # Geodesic distance is in m, hiking speed in km/h, so time is in h.
+        return time
+    return tobler_dist
+
+
+def raster_areas(coordinate_transform, nx, ny):
+    """Compute the area of raster cells.
+
+    For a raster grid where the midpoints of the grid cells are given by coordinate_transform(i, j) with integer i and j, calculate the array giving the size of each individual cell for i=0…nx-1, j=0…ny-1.
+
+    Parameters
+    ==========
+    coordinate_transform: A function mapping two integers to cell midpoints, which also allows to be passed non-integer indices.
+    nx: Number of grid cells in a row along the first dimension (usually longitude)
+    ny: Number of grid cells in a row along the second dimension (usually latitude)
+
+    Returns
+    =======
+    Array of shape (nx, ny) containing the area of each grid cell
+
+    Examples
+    ========
+
+    One degree at the equator is about 111 km (~10⁵ m), so a grid cell of 1
+    degree times 10 degrees should be a bit more than 10¹¹ m², and less than
+    that at a latitude of 50°. The areas should be independent of the x
+    (longitudinal) index, up to rounding.
+
+    >>> areas = raster_areas(lambda i, j: (i, j*10), 3, 20)
+    >>> 1.0e11 < areas[0, 0] < 1.5e11
+    True
+    >>> areas[0, 0] > areas[0, 5]
+    True
+    >>> ((0.9999 * areas[0] < areas) & (areas < 1.0001 * areas[0])).all()
+    True
+
+    """
+    areas = numpy.zeros((nx, ny))
+    for x in range(nx):
+        for y in range(ny):
+            areas[x, y] = distance.measurePolygon([
+                QgsPointXY(*coordinate_transform(x - 0.5, y - 0.5)),
+                QgsPointXY(*coordinate_transform(x - 0.5, y + 0.5)),
+                QgsPointXY(*coordinate_transform(x + 0.5, y + 0.5)),
+                QgsPointXY(*coordinate_transform(x + 0.5, y - 0.5))])
+    return areas
+
+
+def grid_dist(cell1, cell2):
+    """Euclidian distance between two points
+
+    In particular, 1 for adjacent cells and √2 for diagonally touching square
+    cells
+
+    """
+    return ((cell1[0] - cell2[0]) ** 2 + (cell1[1] - cell2[1]) ** 2) ** 0.5
+
+
+def grid_distance(start: (int, int),
+                  size: (int, int),
+                  cutoff: float = numpy.inf,
+                  end: (int, int) = None,
+                  distance_fn: Callable[[Tuple[int, int], Tuple[int, int]],
+                                        float] = grid_dist) -> numpy.ndarray:
+    """Calculate the shortest path along a grid from a starting point.
+
+    Use Dijkstra's algorithm to calculate the shortest distance along a
+    rectangular grid, with diagonal connections, to every grid point from a
+    given starting grid location. End when a defined endpoint is reached. Only
+    include those grid points with a distance of less than a given cutoff.
+    (Leave the cutoff at ∞ to include all reachable points.)
+
+    The distance function from a cell to its neighbors can be specified. This
+    distance function may be directed. By default, the distance is calculated
+    as 1 for horizontally or vertically adjacent cells and √2 for diagonally
+    adjacent cells. Use a distance function that ignores the first argument to
+    implement a cost function for each grid cell.
+
+    Parameters
+    ==========
+    start: The starting grid index
+    size: The size of the grid
+    cutoff: The cutoff for the maximum distance to be included
+    end: The dstination, reaching will end the search
+    distance_fn: A function mapping a pair of grid indices to a distance
+
+    Returns
+    =======
+    Array of given size where each entry corresponds to the computed distance
+
+    Examples
+    ========
+
+    >>> grid_distance((1,2), (4,4))
+    array([[2.41421356, 1.41421356, 1.        , 1.41421356],
+           [2.        , 1.        , 0.        , 1.        ],
+           [2.41421356, 1.41421356, 1.        , 1.41421356],
+           [2.82842712, 2.41421356, 2.        , 2.41421356]])
+    >>> grid_distance((1,2), (4,4), 2)
+    array([[       inf, 1.41421356, 1.        , 1.41421356],
+           [       inf, 1.        , 0.        , 1.        ],
+           [       inf, 1.41421356, 1.        , 1.41421356],
+           [       inf,        inf,        inf,        inf]])
+
+    Using a cost function that increases from left to right:
+
+    >>> grid_distance((1, 2), (5, 5), 5, distance_fn=lambda x, y: y[1] + 1)
+    array([[ 3.,  2.,  3.,  4., inf],
+           [ 3.,  2.,  0.,  4., inf],
+           [ 3.,  2.,  3.,  4., inf],
+           [ 3.,  4., inf, inf, inf],
+           [ 4., inf, inf, inf, inf]])
+
+    """
+    result = numpy.full(size, numpy.inf)
+    queue = []
+    heappush(queue, (0.0, start))
+    while queue:
+        path_len, current = heappop(queue)
+        col, row = current
+        if path_len >= cutoff:
+            break
+        if result[current] == numpy.inf:
+            result[current] = path_len
+            if current == end:
+                return result
+            for neighbor in [(col-1, row),
+                             (col-1, row-1),
+                             (col, row-1),
+                             (col+1, row-1),
+                             (col+1, row),
+                             (col+1, row+1),
+                             (col, row+1),
+                             (col-1, row+1)]:
+                if neighbor[0] < 0 or neighbor[0] >= result.shape[0]:
+                    continue
+                if neighbor[1] < 0 or neighbor[1] >= result.shape[1]:
+                    continue
+                if result[neighbor] == numpy.inf:
+                    d = distance_fn(current, neighbor)
+                    heappush(queue, (path_len + d, neighbor))
+
+    return result

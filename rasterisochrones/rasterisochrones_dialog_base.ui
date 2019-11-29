@@ -1,32 +1,145 @@
-<ui version="4.0" >
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
  <class>RasterIsochronesDialogBase</class>
- <widget class="QDialog" name="RasterIsochronesDialogBase" >
-  <property name="geometry" >
+ <widget class="QDialog" name="RasterIsochronesDialogBase">
+  <property name="geometry">
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>400</width>
-    <height>300</height>
+    <width>462</width>
+    <height>322</height>
    </rect>
   </property>
-  <property name="windowTitle" >
+  <property name="windowTitle">
    <string>Raster-based Isochrones</string>
   </property>
-  <widget class="QDialogButtonBox" name="button_box" >
-   <property name="geometry" >
+  <widget class="QWidget" name="verticalLayoutWidget">
+   <property name="geometry">
     <rect>
-     <x>30</x>
-     <y>240</y>
-     <width>341</width>
-     <height>32</height>
+     <x>10</x>
+     <y>10</y>
+     <width>444</width>
+     <height>294</height>
     </rect>
    </property>
-   <property name="orientation" >
-    <enum>Qt::Horizontal</enum>
-   </property>
-   <property name="standardButtons" >
-    <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
-   </property>
+   <layout class="QVBoxLayout" name="vstack">
+    <item>
+     <layout class="QFormLayout" name="form">
+      <item row="1" column="0">
+       <widget class="QLabel" name="data_heading">
+        <property name="text">
+         <string>Data Settings</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="points_l">
+        <property name="text">
+         <string>Origin Points Layer</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QComboBox" name="points"/>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="raster_l">
+        <property name="text">
+         <string>Raster Data Layer</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QComboBox" name="raster"/>
+      </item>
+      <item row="5" column="0">
+       <widget class="QLabel" name="area_heading">
+        <property name="text">
+         <string>Area Settings</string>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="0">
+       <widget class="QLabel" name="distance_fn_l">
+        <property name="text">
+         <string>Distance Function</string>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="1">
+       <widget class="QComboBox" name="distance_fn">
+        <item>
+         <property name="text">
+          <string>Tobler's Hiking Time</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Tobler's Hiking Time (Backwards)</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Geodesic Grid Distance</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Grid distance</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="7" column="0">
+       <widget class="QLabel" name="maximum_dist_l">
+        <property name="text">
+         <string>Maximum Distance</string>
+        </property>
+       </widget>
+      </item>
+      <item row="7" column="1">
+       <widget class="QDoubleSpinBox" name="maximum_dist">
+        <property name="maximum">
+         <double>999999.989999999990687</double>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QLineEdit" name="column">
+        <property name="toolTip">
+         <string>The area covered will be added as attribute to the points layer under this field name.</string>
+        </property>
+        <property name="toolTipDuration">
+         <number>3</number>
+        </property>
+        <property name="statusTip">
+         <string/>
+        </property>
+        <property name="placeholderText">
+         <string>reachable_area</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="column_r">
+        <property name="text">
+         <string>Column Name</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QDialogButtonBox" name="button_box">
+      <property name="orientation">
+       <enum>Qt::Horizontal</enum>
+      </property>
+      <property name="standardButtons">
+       <set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
+      </property>
+     </widget>
+    </item>
+   </layout>
   </widget>
  </widget>
  <resources/>
@@ -37,13 +150,13 @@
    <receiver>RasterIsochronesDialogBase</receiver>
    <slot>accept()</slot>
    <hints>
-    <hint type="source_label" >
-     <x>248</x>
-     <y>254</y>
+    <hint type="sourcelabel">
+     <x>20</x>
+     <y>20</y>
     </hint>
-    <hint type="destination_label" >
-     <x>157</x>
-     <y>274</y>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
     </hint>
    </hints>
   </connection>
@@ -53,13 +166,13 @@
    <receiver>RasterIsochronesDialogBase</receiver>
    <slot>reject()</slot>
    <hints>
-    <hint type="source_label" >
-     <x>316</x>
-     <y>260</y>
+    <hint type="sourcelabel">
+     <x>20</x>
+     <y>20</y>
     </hint>
-    <hint type="destination_label" >
-     <x>286</x>
-     <y>274</y>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
     </hint>
    </hints>
   </connection>
