@@ -244,7 +244,7 @@ class RasterIsochrones:
             original = gdal.Open(provider.dataSourceUri())
             anchor_x, x0, x1, anchor_y, y0, y1 = original.GetGeoTransform()
             print((anchor_x, anchor_y), (x0, x1), (y0, y1))
-            def coordinates_for_cell(col, row):
+            def coordinates_for_cell(row, col):
                 col += 0.5
                 row += 0.5
                 return (anchor_x + x0 * col + x1 * row,
@@ -259,7 +259,7 @@ class RasterIsochrones:
                 # int() truncates towards 0, so we have to use something else.
                 # int(col) - (col<0) would also be an option, but is even more intransparent.
                 # Negative cell indices *should* not appear, but who knows what else this function will be used for!
-                return (round(col - 0.5), round(row - 0.5))
+                return (round(row - 0.5), round(col - 0.5))
             if self.dlg.distance_fn.currentText() == "Tobler's Hiking Time":
                 elevation = provider.block(1, provider.extent(), provider.xSize(), provider.ySize())
                 distance_fn = tobler_hiking_time(elevation, coordinates_for_cell)
@@ -283,8 +283,8 @@ class RasterIsochrones:
                 self.dlg.distance_fn.currentText()))
 
             areas = raster_areas(coordinates_for_cell,
-                                 raster_layer.dataProvider().xSize(),
-                                 raster_layer.dataProvider().ySize())
+                                 raster_layer.dataProvider().ySize(),
+                                 raster_layer.dataProvider().xSize())
 
             id_new_col = points_layer.dataProvider().fieldNameIndex(column)
             if id_new_col == -1:
@@ -312,7 +312,7 @@ class RasterIsochrones:
 
                 distances = grid_distance(
                     (col, row),
-                    (provider.xSize(), provider.ySize()),
+                    (provider.ySize(), provider.xSize()),
                     cutoff=self.dlg.maximum_dist.value(),
                     distance_fn=distance_fn)
 
@@ -355,11 +355,18 @@ class RasterIsochrones:
                                       distances.shape[1], distances.shape[0],
                                       1, gdal.GDT_Float32)
                 # Write metadata
-                outDs.SetGeoTransform(
-                                      [anchor_x + x0 * col0 + x1 * row0,
+                print([anchor_x + x0 * col0 + x1 * row0,
                                        x0,
                                        x1,
                                        anchor_y + y0 * col0 + y1 * row0,
+                                       y0,
+                                       y1],
+                      col0, row0)
+                outDs.SetGeoTransform(
+                                      [anchor_x + x0 * row0 + x1 * col0,
+                                       x0,
+                                       x1,
+                                       anchor_y + y0 * row0 + y1 * col0,
                                        y0,
                                        y1])
                 outDs.SetProjection(original.GetProjection())
