@@ -243,23 +243,24 @@ class RasterIsochrones:
 
             original = gdal.Open(provider.dataSourceUri())
             anchor_x, x0, x1, anchor_y, y0, y1 = original.GetGeoTransform()
-            print((anchor_x, anchor_y), (x0, x1), (y0, y1))
+            print("NE (usually) corner:", (anchor_x, anchor_y))
+            print("Transformaton matrix:", (x0, x1), (y0, y1))
             def coordinates_for_cell(row, col):
                 col += 0.5
                 row += 0.5
                 return (anchor_x + x0 * col + x1 * row,
                         anchor_y + y0 * col + y1 * row)
             def cell_for_coordinates(coordinates):
-                coeff = 1 / (x0 * y1 + x1 * y0)
+                coeff = 1 / (x0 * y1 - x1 * y0)
                 x_raw, y_raw = coordinates
                 x = x_raw - anchor_x
                 y = y_raw - anchor_y
                 col = coeff * (y1 * x - x1 * y)
                 row = coeff * (-y0 * x + x0 * y)
                 # int() truncates towards 0, so we have to use something else.
-                # int(col) - (col<0) would also be an option, but is even more intransparent.
                 # Negative cell indices *should* not appear, but who knows what else this function will be used for!
-                return (round(row - 0.5), round(col - 0.5))
+                return (int(row), int(col))
+
             if self.dlg.distance_fn.currentText() == "Tobler's Hiking Time":
                 elevation = provider.block(1, provider.extent(), provider.xSize(), provider.ySize())
                 distance_fn = tobler_hiking_time(elevation, coordinates_for_cell)
@@ -285,6 +286,9 @@ class RasterIsochrones:
             areas = raster_areas(coordinates_for_cell,
                                  raster_layer.dataProvider().ySize(),
                                  raster_layer.dataProvider().xSize())
+            print("Areas array:", areas.shape)
+            print(areas[0])
+            print(areas[:, 0])
 
             id_new_col = points_layer.dataProvider().fieldNameIndex(column)
             if id_new_col == -1:
@@ -299,22 +303,18 @@ class RasterIsochrones:
             for f in points_layer.getFeatures():
                 location = f.geometry().asPoint()
                 if not extent.contains(location):
-                    QgsMessageLog.logMessage(
-                        "Feature {:} at {:} {:} is outside boundaries of {:}"
-                        "".format(f.id(),
-                                  location.x(), location.y(),
-                                  raster_layer.name()),
-                        'rasterisochrones',
-                        level=Qgis.Warning)
                     continue
 
+                print("Feature location:", location.x(), location.y())
                 col, row = cell_for_coordinates((location.x(), location.y()))
+                print("Feature cell:", col, row)
 
                 distances = grid_distance(
                     (col, row),
                     (provider.ySize(), provider.xSize()),
                     cutoff=self.dlg.maximum_dist.value(),
                     distance_fn=distance_fn)
+                print("Distances array:", distances.shape)
 
                 area = areas[numpy.isfinite(distances)].sum()
                 print("Calculated area:", area)
@@ -332,6 +332,7 @@ class RasterIsochrones:
                 row1 = provider.ySize()
                 while not numpy.isfinite(distances[:, row1 - 1]).any():
                     row1 -= 1
+                print("Reached subset:", (col0, col1), (row0, row1))
                 distances = distances[col0:col1, row0:row1]
                 distances[~numpy.isfinite(distances)] = -1.0
 
@@ -340,7 +341,7 @@ class RasterIsochrones:
                 _, distances_np = tempfile.mkstemp(
                     suffix=".numpy".format(f.id()),
                     prefix="rasterisochrones_{:}_".format(f.id()))
-                print("Distances:", distances, "written to", distances_np)
+                print("Distances array:", distances.shape, "written to", distances_np)
                 numpy.savetxt(distances_np, distances)
 
                 with edit(points_layer):
@@ -355,13 +356,6 @@ class RasterIsochrones:
                                       distances.shape[1], distances.shape[0],
                                       1, gdal.GDT_Float32)
                 # Write metadata
-                print([anchor_x + x0 * col0 + x1 * row0,
-                                       x0,
-                                       x1,
-                                       anchor_y + y0 * col0 + y1 * row0,
-                                       y0,
-                                       y1],
-                      col0, row0)
                 outDs.SetGeoTransform(
                                       [anchor_x + x0 * row0 + x1 * col0,
                                        x0,
@@ -442,10 +436,12 @@ def directed_geodesic_grid_distance(coordinate):
             p2 = coordinates[cell2]
         except KeyError:
             p2 = coordinates[cell2] = QgsPointXY(*coordinate(*cell2))
-        if p1[0] > p2[0]:
+        # Forbid going to the north or to the east
+        if p2[0] < p1[0]:
             return numpy.inf
-        if p1[1] > p2[1]:
+        if p2[1] < p1[1]:
             return numpy.inf
+        print(p1, p2)
         return distance.measureLine([p1, p2])
     return dist
 
