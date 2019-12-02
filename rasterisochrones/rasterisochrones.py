@@ -54,6 +54,24 @@ import cartopy.geodesic as geodesic
 distance = QgsDistanceArea()
 distance.setEllipsoid('WGS84')
 
+def affine_transformations(anchor_x, x0, x1, anchor_y, y0, y1):
+    def coordinates_for_cell(col, row):
+        col += 0.5
+        row += 0.5
+        return (anchor_x + x0 * col + x1 * row,
+                anchor_y + y0 * col + y1 * row)
+    def cell_for_coordinates(coordinates):
+        coeff = 1 / (x0 * y1 - x1 * y0)
+        x_raw, y_raw = coordinates
+        x = x_raw - anchor_x
+        y = y_raw - anchor_y
+        col = coeff * (y1 * x - x1 * y)
+        row = coeff * (-y0 * x + x0 * y)
+        # int() truncates towards 0, so we have to use something else.
+        # Negative cell indices *should* not appear, but who knows what else this function will be used for!
+        return (int(col), int(row))
+    return coordinates_for_cell, cell_for_coordinates
+
 class RasterIsochrones:
     """QGIS Plugin Implementation."""
 
@@ -243,33 +261,19 @@ class RasterIsochrones:
 
             original = gdal.Open(provider.dataSourceUri())
             anchor_x, x0, x1, anchor_y, y0, y1 = original.GetGeoTransform()
-            print("NE (usually) corner:", (anchor_x, anchor_y))
-            print("Transformaton matrix:", (x0, x1), (y0, y1))
-            def coordinates_for_cell(col, row):
-                col += 0.5
-                row += 0.5
-                return (anchor_x + x0 * col + x1 * row,
-                        anchor_y + y0 * col + y1 * row)
-            def cell_for_coordinates(coordinates):
-                coeff = 1 / (x0 * y1 - x1 * y0)
-                x_raw, y_raw = coordinates
-                x = x_raw - anchor_x
-                y = y_raw - anchor_y
-                col = coeff * (y1 * x - x1 * y)
-                row = coeff * (-y0 * x + x0 * y)
-                # int() truncates towards 0, so we have to use something else.
-                # Negative cell indices *should* not appear, but who knows what else this function will be used for!
-                return (int(col), int(row))
-
+            # print("NE (usually) corner:", (anchor_x, anchor_y))
+            # print("Transformaton matrix:", (x0, x1), (y0, y1))
+            coordinates_for_cell, cell_for_coordinates = affine_transformations(
+                anchor_x, x0, x1, anchor_y, y0, y1)
             if self.dlg.distance_fn.currentText() == "Tobler's Hiking Time":
                 elevation = original.ReadAsArray().T
-                print("Elevation:", elevation.shape)
+                # print("Elevation:", elevation.shape)
                 distance_fn = tobler_hiking_time(elevation, coordinates_for_cell)
             elif self.dlg.distance_fn.currentText() == "Tobler's Hiking Time (Backwards)":
-                distance_fn = directed_geodesic_grid_distance(coordinates_for_cell)
-                # elevation = provider.block(1, provider.extent(), provider.xSize(), provider.ySize())
-                # raise NotImplementedError("We lack a way to go backwards")
-                # distance_fn = tobler_hiking_time(elevation, coordinates_for_cell)
+                # Instead of turning around the paths, we turn around the
+                # elevations, for the same effect
+                elevation = -original.ReadAsArray().T
+                distance_fn = tobler_hiking_time(elevation, coordinates_for_cell)
             elif self.dlg.distance_fn.currentText() == "Geodesic Grid Distance":
                 distance_fn = geodesic_grid_distance(coordinates_for_cell)
             elif self.dlg.distance_fn.currentText() == "Grid distance":
@@ -283,16 +287,16 @@ class RasterIsochrones:
             root = project.layerTreeRoot()
             group = root.insertGroup(0, "Isochrones for {:}".format(
                 self.dlg.distance_fn.currentText()))
-            print("Provider shape:",
-                  raster_layer.dataProvider().xSize(),
-                  raster_layer.dataProvider().ySize())
-            print("Corner check:",
-                  coordinates_for_cell(0, 0),
-                  coordinates_for_cell(raster_layer.dataProvider().xSize(),
-                                       raster_layer.dataProvider().ySize()))
-            print("Cross-check:",
-                  coordinates_for_cell(raster_layer.dataProvider().ySize(),
-                                       raster_layer.dataProvider().xSize()))
+            # print("Provider shape:",
+            #       raster_layer.dataProvider().xSize(),
+            #       raster_layer.dataProvider().ySize())
+            # print("Corner check:",
+            #       coordinates_for_cell(0, 0),
+            #       coordinates_for_cell(raster_layer.dataProvider().xSize(),
+            #                            raster_layer.dataProvider().ySize()))
+            # print("Cross-check:",
+            #       coordinates_for_cell(raster_layer.dataProvider().ySize(),
+            #                            raster_layer.dataProvider().xSize()))
 
             try:
                 id_data_col = points_layer.dataProvider().fieldNameMap()[column]
@@ -309,16 +313,16 @@ class RasterIsochrones:
                 if not extent.contains(location):
                     continue
 
-                print("Feature location:", location.x(), location.y())
+                # print("Feature location:", location.x(), location.y())
                 col, row = cell_for_coordinates((location.x(), location.y()))
-                print("Feature cell:", col, row)
+                # print("Feature cell:", col, row)
 
                 distances = grid_distance(
                     (col, row),
                     (provider.xSize(), provider.ySize()),
                     cutoff=self.dlg.maximum_dist.value(),
                     distance_fn=distance_fn)
-                print("Distances array:", distances.shape)
+                # print("Distances array:", distances.shape)
 
                 assert (distances == 0).any()
                 col0 = 0
@@ -333,10 +337,10 @@ class RasterIsochrones:
                 row1 = provider.ySize()
                 while not numpy.isfinite(distances[:, row1 - 1]).any():
                     row1 -= 1
-                print("Reached subset:", (col0, col1), (row0, row1))
+                # print("Reached subset:", (col0, col1), (row0, row1))
                 distances = distances[col0:col1, row0:row1]
                 distances[~numpy.isfinite(distances)] = -1.0
-                print("Summary statistics:", len(distances[distances != -1]))
+                # print("Summary statistics:", len(distances[distances != -1]))
 
                 grid_area = raster_areas(
                     coordinates_for_cell,
@@ -347,11 +351,11 @@ class RasterIsochrones:
                 _, distances_np = tempfile.mkstemp(
                     suffix=".numpy".format(f.id()),
                     prefix="rasterisochrones_{:}_".format(f.id()))
-                print("Distances array:", distances.shape, "written to", distances_np)
+                # print("Distances array:", distances.shape, "written to", distances_np)
                 numpy.savetxt(distances_np, distances)
 
                 with edit(points_layer):
-                    print(area)
+                    # print(area)
                     f[id_data_col] = float(area)
                     points_layer.updateFeature(f)
 
@@ -375,7 +379,7 @@ class RasterIsochrones:
                 band.WriteArray(distances.T)
                 band.SetNoDataValue(-1.0)
                 del outDs
-                print("GeoTiff of distances written to", output_file)
+                # print("GeoTiff of distances written to", output_file)
 
                 layer = QgsRasterLayer(
                     output_file,
@@ -449,7 +453,7 @@ def directed_geodesic_grid_distance(coordinate):
             return numpy.inf
         if p2[1] < p1[1]:
             return numpy.inf
-        print(p1, p2)
+        # print(p1, p2)
         return distance.measureLine([p1, p2])
     return dist
 
@@ -500,7 +504,7 @@ def raster_areas(coordinate_transform, x_range, y_range, cache={}):
 
     """
     areas = numpy.zeros((len(x_range), len(y_range)))
-    print("Areas shape:", areas.shape)
+    # print("Areas shape:", areas.shape)
     for i, x in enumerate(x_range):
         for j, y in enumerate(y_range):
             areas[i, j] = distance.measurePolygon([
@@ -578,8 +582,8 @@ def grid_distance(start: (int, int),
 
     """
     result = numpy.full(size, numpy.inf)
-    print("Dijkstra shape:", size)
-    print("Starting point:", start)
+    # print("Dijkstra shape:", size)
+    # print("Starting point:", start)
     queue = []
     heappush(queue, (0.0, start))
     while queue:
@@ -608,3 +612,82 @@ def grid_distance(start: (int, int),
                     heappush(queue, (path_len + d, neighbor))
 
     return result
+
+if __name__ == "__main__":
+    import json
+    import argparse
+
+    class ExtendAction(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            items = getattr(namespace, self.dest) or []
+            items.extend(values)
+            setattr(namespace, self.dest, items)
+
+    def longlat(string):
+        x, y = string.split("/")
+        return float(x), float(y)
+
+    def latlong(string):
+        y, x = string.split("/")
+        return float(x), float(y)
+
+    def geojson(string):
+        with open(string) as jsonfile:
+            data = json.load(jsonfile)["features"]
+        for feature in data:
+            yield feature["geometry"]["coordinates"]
+
+    parser = argparse.ArgumentParser(description="Calculate area reachable from points by hiking")
+    parser.register('action', 'extend', ExtendAction)
+    parser.add_argument("elevation")
+    parser.add_argument("--longlat", dest="longlat", action="append", type=longlat)
+    parser.add_argument("--latlong", dest="longlat", action="append", type=latlong)
+    parser.add_argument("--geojson", dest="longlat", action="extend", type=geojson)
+    args = parser.parse_args()
+
+    original = gdal.Open(args.elevation)
+    anchor_x, x0, x1, anchor_y, y0, y1 = original.GetGeoTransform()
+    coordinates_for_cell, cell_for_coordinates = affine_transformations(
+        anchor_x, x0, x1, anchor_y, y0, y1)
+
+    elevation = original.ReadAsArray().T
+    distance_fn = tobler_hiking_time(elevation, coordinates_for_cell)
+
+    for longlat in args.longlat:
+        col, row = cell_for_coordinates(longlat)
+
+        # print(elevation.shape, col, row)
+        if not 0 <= col < elevation.shape[0]:
+            # print("outside")
+            continue
+        if not 0 <= row < elevation.shape[1]:
+            # print("outside")
+            continue
+        distances = grid_distance(
+            (col, row),
+            elevation.shape,
+            cutoff=12,
+            distance_fn=distance_fn)
+
+        assert (distances == 0).any()
+        col0 = 0
+        while not numpy.isfinite(distances[col0]).any():
+            col0 += 1
+        col1 = distances.shape[0]
+        while not numpy.isfinite(distances[col1 - 1]).any():
+            col1 -= 1
+        row0 = 0
+        while not numpy.isfinite(distances[:, row0]).any():
+            row0 += 1
+        row1 = distances.shape[1]
+        while not numpy.isfinite(distances[:, row1 - 1]).any():
+            row1 -= 1
+        distances = distances[col0:col1, row0:row1]
+
+        grid_area = raster_areas(
+            coordinates_for_cell,
+            range(col0, col1), range(row0, row1),
+            cache={})
+        area = grid_area[numpy.isfinite(distances)].sum()
+
+        print(longlat, area)
