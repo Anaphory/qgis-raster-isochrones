@@ -35,7 +35,7 @@ try:
     from .resources import *
     # Import the code for the dialog
     from .rasterisochrones_dialog import RasterIsochronesDialog
-except ModuleNotFoundError:
+except (ImportError, ModuleNotFoundError):
     pass
 
 import os.path
@@ -54,7 +54,50 @@ import cartopy.geodesic as geodesic
 distance = QgsDistanceArea()
 distance.setEllipsoid('WGS84')
 
-def affine_transformations(anchor_x, x0, x1, anchor_y, y0, y1):
+def affine_transformation(anchor_x, x0, x1, anchor_y, y0, y1):
+    """Construct an affine coordinate transform and its inverse.
+
+    From a GDAL-style specification of the parameters of an affine
+    transformation, construct both the affine function that maps integer cell
+    indices to the center points of the corresponding cells, and points in a
+    cell to the cell they belong to. The point (anchor_x, anchor_y) is a corner
+    of the cell (0, 0).
+
+    Parameters
+    ==========
+    anchor_x: X-Coordinate of a corner of the cell (0, 0)
+    x0: Increase in X-Coordinate between cells (0, 0) and (1, 0)
+    x1: Increase in X-Coordinate between cells (0, 0) and (0, 1)
+    anchor_y: Y-Coordinate of a corner of the cell (0, 0)
+    y0: Increase in Y-Coordinate between cells (0, 0) and (1, 0)
+    y1: Increase in Y-Coordinate between cells (0, 0) and (0, 1)
+
+    Returns
+    =======
+    coordinates_for_cell: Function mapping integer indices to coordinates
+    cell_for_coordinates: Function mapping coordinates to the cell they lie indices
+
+    Examples
+    ========
+
+    >>> integer_grid_mids, integer_grid_cell = affine_transformation(0, 1, 0, 0, 0, 1)
+    >>> integer_grid_mids(0, 0)
+    (0.5, 0.5)
+    >>> integer_grid_cell((9.4, 2.1))
+    (9, 2)
+
+    >>> shifted_grid_mids, shifted_grid_cell = affine_transformation(5, 1, 0, 2, 0, 1)
+    >>> shifted_grid_mids(0, 0)
+    (5.5, 2.5)
+    >>> shifted_grid_cell((9.4, 2.1))
+    (4, 0)
+
+    >>> forward, back = affine_transformation(*numpy.random.normal(size=6))
+    >>> back(forward(0, 0))
+    (0, 0)
+    >>> back(forward(3, 4))
+    (3, 4)
+    """
     def coordinates_for_cell(col, row):
         col += 0.5
         row += 0.5
@@ -263,7 +306,7 @@ class RasterIsochrones:
             anchor_x, x0, x1, anchor_y, y0, y1 = original.GetGeoTransform()
             # print("NE (usually) corner:", (anchor_x, anchor_y))
             # print("Transformaton matrix:", (x0, x1), (y0, y1))
-            coordinates_for_cell, cell_for_coordinates = affine_transformations(
+            coordinates_for_cell, cell_for_coordinates = affine_transformation(
                 anchor_x, x0, x1, anchor_y, y0, y1)
             if self.dlg.distance_fn.currentText() == "Tobler's Hiking Time":
                 elevation = original.ReadAsArray().T
@@ -494,7 +537,7 @@ def raster_areas(coordinate_transform, x_range, y_range, cache={}):
     that at a latitude of 50°. The areas should be independent of the x
     (longitudinal) index, up to rounding.
 
-    >>> areas = raster_areas(lambda i, j: (i, j*10), range(3), range(20))
+    >>> areas = raster_areas(lambda i, j: (i, j*10), range(3), range(9))
     >>> 1.0e11 < areas[0, 0] < 1.5e11
     True
     >>> areas[0, 0] > areas[0, 5]
@@ -647,7 +690,7 @@ if __name__ == "__main__":
 
     original = gdal.Open(args.elevation)
     anchor_x, x0, x1, anchor_y, y0, y1 = original.GetGeoTransform()
-    coordinates_for_cell, cell_for_coordinates = affine_transformations(
+    coordinates_for_cell, cell_for_coordinates = affine_transformation(
         anchor_x, x0, x1, anchor_y, y0, y1)
 
     elevation = original.ReadAsArray().T
